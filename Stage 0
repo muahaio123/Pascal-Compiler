@@ -1,0 +1,653 @@
+// Thanh Long Le
+// CS 4301
+// Stage 0
+
+#include <stage0.h>
+#include <iostream>
+#include <fstream>
+#include <string>
+#include <vector>
+#include <iomanip>
+using namespace std;
+
+time_t now = time(NULL);	// get the time in seconds
+// ctime(&now) will turn is to date, time, year
+
+Compiler::Compiler(char **argv)	// constructor
+{
+	sourceFile.open(argv[1]);
+	listingFile.open(argv[2]);
+	objectFile.open(argv[3]);
+}
+
+Compiler::~Compiler()			// destructor
+{
+	sourceFile.close();
+	listingFile.close();
+	objectFile.close();
+}
+
+void Compiler::createListingHeader()
+{
+	// output to the .lst file
+	listingFile << "STAGE0:  Thanh Long Le      "<< ctime(&now) << endl;
+	listingFile << "LINE NO.              SOURCE STATEMENT" << endl;
+	listingFile << endl << right << setw(5) << '1' << '|';
+}
+
+void Compiler::parser()
+{
+	nextChar();
+	
+	if (nextToken() != "program")
+		processError("keyword \"program\" expected");
+	
+	prog();
+}
+
+void Compiler::createListingTrailer()
+{
+	listingFile << "\n\nCOMPILATION TERMINATED      " << errorCount;
+	
+	if (errorCount == 1)
+		listingFile << " ERROR ENCOUNTERED" << endl;
+	else
+		listingFile	<< " ERRORS ENCOUNTERED" << endl;
+}
+
+// Methods implementing the grammar productions
+void Compiler::prog()			// stage 0, production 1
+{
+	if (token != "program")
+		processError("keyword \"program\" expected");
+	
+	progStmt();	// initialize the program and create entry into the symbolTable
+	
+	if (token == "const")
+		consts();
+	
+	if (token == "var")
+		vars();
+	
+	if (token != "begin")
+		processError("keyword \"begin\" expected");
+	
+	beginEndStmt();
+	
+	if (token[0] != END_OF_FILE)
+		processError("no text may follow \"end\"");
+}
+
+void Compiler::progStmt()       // stage 0, production 2
+{
+	string x;
+	
+	if (token != "program")
+		processError("keyword \"program\" expected");
+	
+	x = nextToken();	// x has the program's name
+	
+	if (!isNonKeyId(token))
+		processError("program name expected");
+	
+	if (nextToken() != ";")
+		processError("semicolon expected");
+	
+	nextToken();	// initialize the next token for const, var or begin
+	
+	code("program", x);		// start output to .asm file
+	
+	insert(x, PROG_NAME, CONSTANT, x, NO, 0);
+}
+
+void Compiler::consts()         // stage 0, production 3
+{
+	if (token != "const")
+		processError("keyword \"const\" expected");
+	
+	if (!isNonKeyId(nextToken()))	// after const, there must be a constant variable name
+		processError("non-keyword identifier must follow \"const\"");
+		
+	constStmts();
+}
+
+void Compiler::vars()           // stage 0, production 4
+{
+	if (token != "var")
+		processError("keyword \"var\" expected");
+	
+	if (!isNonKeyId(nextToken()))	// after var, there must be a variable name
+		processError("non-keyword identifier must follow \"var\"");
+	
+	varStmts();
+}
+
+// begin ... end.
+void Compiler::beginEndStmt()   // stage 0, production 5
+{
+	if (token != "begin")
+		processError("keyword \"begin\" expected");
+	
+	if (nextToken() != "end")
+		processError("keyword \"end\" expected");
+	
+	if (nextToken() != ".")
+		processError("period expected");
+	
+	nextToken();
+	
+	code("end", ".");	// output to the .asm file
+}
+
+void Compiler::constStmts()     // stage 0, production 6
+{
+	string x, y;
+	
+	if (!isNonKeyId(token))
+		processError("non-keyword identifier expected");
+	
+	x = token;	// x has the constant's name
+	
+	// check for format x = y;
+	if (nextToken() != "=")
+		processError("\"=\" expected");
+	
+	y = nextToken();	// y has the value of that constant
+	
+	// if y is not one of "+","-","not",NON_KEY_ID,"true","false",INTEGER
+	if (!isNonKeyId(y) && !isLiteral(y))	// y is not a number, true-false or a non-key ID
+		processError("token to right of \"=\" illegal");
+	
+	if (y == "+" || y == "-")
+	{
+		if (!isInteger(nextToken()))
+			processError("integer expected after sign");
+		
+		y += token;
+	}
+	
+	else if (y == "not")
+	{
+		if (!isBoolean(nextToken()))	// if after not isn't "true" or "false"
+			processError("boolean expected after \"not\"");
+		
+		if (token == "true")
+			y = "false";
+		else
+			y = "true";
+	}
+	
+	else if (isNonKeyId(y))	// if constant = another_constant -> search for it
+	{
+		// .find() will go through each key in the symbolTable map
+		// if it reaches .end() -> did not find the key
+		if (symbolTable.find(y) == symbolTable.end())
+			processError("reference to undefined constant");
+		else
+			y = symbolTable.find(y)->second.getValue();
+	}
+	
+	// check for format: x = y;
+	if (nextToken() != ";")
+		processError("semicolon expected");
+	
+	if (whichType(y) != INTEGER && whichType(y) != BOOLEAN)
+		processError("data type of token on the right-hand side must be INTEGER or BOOLEAN");
+	
+	insert(x, whichType(y), CONSTANT, whichValue(y), YES, 1);
+	
+	x = nextToken();
+	
+	// if after a constant declaration is another non_key_id or "var" or "begin"
+	if (x != "begin" && x != "var" && !isNonKeyId(x))
+		processError("non-keyword identifier, \"begin\", or \"var\" expected");
+	
+	if (isNonKeyId(x))
+		constStmts();	// call it again to insert another constant
+	
+	// if x is begin or var -> return to consts() -> return to prog()
+	// to continue check for both of them
+}
+
+void Compiler::varStmts()       // stage 0, production 7
+{
+	string x, y;
+	
+	if (!isNonKeyId(token))
+		processError("non-keyword identifier expected");
+	
+	x = ids();	// get the list of variables: var1,var2,...
+	
+	// check for format: var1,var2 : "integer" or "boolean";
+	if (token != ":")
+		processError("\":\" expected");
+	
+	nextToken();	// token now has the word after ":"
+	if (token != "integer" && token != "boolean")
+		processError("illegal type follows \":\"");
+	
+	y = token;	// y has "integer" or "boolean"
+	
+	if (nextToken() != ";")
+		processError("semicolon expected");
+	
+	if (y == "integer")
+		insert(x, INTEGER, VARIABLE, "1", YES, 1);
+	else
+		insert(x, BOOLEAN, VARIABLE, "1", YES, 1);
+	
+	// if after that is "begin" or another non_key_id continue
+	nextToken();
+	
+	if (token != "begin" && !isNonKeyId(token))
+		processError("non-keyword identifier or \"begin\" expected");
+	
+	if (isNonKeyId(token))
+		varStmts();	// call it again to insert another variable
+	
+	// if x is begin -> return to vars() -> return to prog()
+	// to continue check for it
+}
+
+string Compiler::ids()          // stage 0, production 8
+{
+	string temp, tempStr;
+	
+	if (!isNonKeyId(token))
+		processError("non-keyword identifier expected");
+	
+	tempStr = token;
+	temp = token;
+	
+	// if after var1,var2 - and var2 must be a non_key_id
+	if (nextToken() == ",")
+	{
+		if (!isNonKeyId(nextToken()))
+			processError("non-keyword identifier expected");
+		
+		tempStr = temp + "," + ids();	// recursively call ids() to process var2
+	}
+	
+	return tempStr;
+}
+
+
+// Helper functions for the Pascallite lexicon
+bool Compiler::isKeyword(string s) const		// determines if s is a keyword
+{
+	return s == "program" || s == "begin" || s == "end" || s == "var"
+			|| s == "const" || s == "integer" || s == "boolean"
+			|| s == "true" || s == "false" || s == "not";
+}
+
+bool Compiler::isSpecialSymbol(char c) const	// determines if c is a special symbol
+{
+	return c == '=' || c == ':' || c == ',' || c == ';'
+		|| c == '.' || c == '+' || c == '-';
+}
+
+bool Compiler::isNonKeyId(string s) const		// determines if s is a non_key_id
+{
+	if (isKeyword(s))
+		return false;
+	
+	// '_' cannot be at the beginning or the end
+	if (s[s.length() - 1] == '_')
+		return false;
+	
+	for (uint i = 0; i < s.length(); ++i)
+		// it must satisfy: start with a lowercase character
+		// and all the remaining characters must be lowercase or a digit
+		if (!(islower(s[0]) && (isdigit(s[i]) || islower(s[i]) || !(s[i] == '_' && s[i + 1] == '_'))))
+			return false;
+		
+	return true;
+}
+
+bool Compiler::isInteger(string s) const		// determines if s is an integer
+{
+	if (s == "integer")
+		return true;
+	
+	// if s is a constant or variable found inside the table
+	if (symbolTable.find(s) != symbolTable.end())
+	{
+		if (symbolTable.find(s)->second.getDataType() == INTEGER)
+			return true;
+		else
+			return false;
+	}
+	
+	// s can be: 123 || +123 || -123
+	for (uint i = 0; i < s.length(); ++i)
+		if (!(isdigit(s[i]) || s[0] == '+' || s[0] == '-'))
+			return false;
+	
+	return true;
+}
+
+bool Compiler::isBoolean(string s) const		// determines if s is a boolean
+{
+	if (s == "boolean")
+		return true;
+	
+	// if s is a constant or variable found inside the table
+	if (symbolTable.find(s) != symbolTable.end())
+	{
+		if (symbolTable.find(s)->second.getDataType() == BOOLEAN)
+			return true;
+		else
+			return false;
+	}
+	
+	return s == "true" || s == "false" || 
+			s == "not true" || s == "not false";
+}
+
+bool Compiler::isLiteral(string s) const		// determines if s is a literal
+{
+	return isInteger(s) || isBoolean(s) ||
+			s == "+" || s == "-" || s == "not";
+}
+
+// Action routines
+void Compiler::insert(string externalName, storeTypes inType, modes inMode,  string inValue, allocation inAlloc, int inUnits)
+{
+	string name = "";
+	uint i,u,temp;
+	uint count = 0;
+	
+	//break name from list of external names
+	for (i = 0; i < externalName.length(); i++)
+	{
+		if (externalName[i] != ',')
+		{
+			if (count >= 15)
+				continue;
+			
+			name += externalName[i];
+			count++;
+		}
+		else
+			break;
+	}
+	
+	temp = i + 1;   
+	while (name != "")
+	{
+		//symbolTable[name] is defined
+		if(symbolTable.find(name) != symbolTable.end())
+			processError("symbol " + name + " is multiply defined");
+		else if (isKeyword(name))
+			processError("illegal use of keyword");
+		//create table entry
+		else
+		{
+			if (isupper(name[0]))
+				symbolTable.insert({name, SymbolTableEntry(name, inType, inMode, inValue, inAlloc, inUnits)});
+			else
+				symbolTable.insert({name, SymbolTableEntry(genInternalName(inType), inType, inMode, inValue, inAlloc, inUnits)});
+		}
+		
+		name = "";
+		count = 0;
+		
+		for (u = temp; u < externalName.length(); u++)
+		{
+			if(externalName[u] != ',')
+			{
+				if (count >=15)
+					continue;
+				
+				name += externalName[u];
+				count++;
+			}
+			else break;
+		}
+		
+		temp = u + 1;     
+	}
+	
+	if(symbolTable.size() > 256)
+		processError("symbol table overflow -- max 256 entries");
+}
+
+storeTypes Compiler::whichType(string name)		// tells which data type a name has
+{
+	storeTypes dataType;
+	
+	if (isLiteral(name))
+	{
+		if (isBoolean(name))	// if name is "true" || "false"
+			dataType = BOOLEAN;
+		else if (isInteger(name))	// if name is a number
+			dataType = INTEGER;
+	}
+	else
+	{
+		// if name is a variable or constant
+		// -> look up the table and get its data type
+		if (symbolTable.find(name) != symbolTable.end())
+			dataType = symbolTable.find(name)->second.getDataType();
+		else
+			processError("reference to undefined constant");
+	}
+	
+	return dataType;
+}
+
+string Compiler::whichValue(string name)		// tells which value a name has
+{
+	string value;
+	
+	if (isLiteral(name))
+	{
+		// false will be stored as 32-bit of 0
+		if (name == "false")
+			value = "0";
+		
+		// true will be stored as 32-bit of 1
+		else if (name == "true")
+			value = "-1";
+		
+		else	// if name is an INTEGER
+			value = name;
+	}
+	else
+	{
+		if (symbolTable.find(name) != symbolTable.end() && 
+				symbolTable.find(name)->second.getValue() != "")
+			value = symbolTable.find(name)->second.getValue();
+		else
+			processError("reference to undefined constant");
+	}
+	
+	return value;
+}
+
+void Compiler::code(string op, string operand1, string operand2)
+{
+	if (op == "program")
+		emitPrologue(operand1);
+	else if (op == "end")
+		emitEpilogue();
+	else
+		processError("compiler error since function code should not be called with illegal arguments");
+}
+
+// Emit Functions
+void Compiler::emit(string label, string instruction, string operands,
+          string comment)
+{
+	objectFile << left << setw(8) << label;
+	objectFile << setw(8) << instruction;
+	objectFile << setw(24) << operands << comment << endl;
+}
+
+void Compiler::emitPrologue(string progName, string)
+{
+	objectFile << "; Thanh Long Le      " << ctime(&now);
+	objectFile << "%INCLUDE \"Along32.inc\"" << endl;
+	objectFile << "%INCLUDE \"Macros_Along.inc\"" << endl;
+	emit("\nSECTION ", ".text");
+	emit("global", "_start", "", "; program " + progName);
+	emit("\n_start: ");
+}
+
+void Compiler::emitEpilogue(string, string)
+{
+	emit("", "Exit", "{0}");
+	emitStorage();
+}
+
+void Compiler::emitStorage()
+{
+	map<string, SymbolTableEntry>::iterator entries;
+	
+	objectFile << endl;
+	
+	emit("SECTION", ".data");
+	/*
+		for those entries in the symbolTable that have
+		an allocation of YES and a storage mode of CONSTANT
+		{ call emit to output a line to objectFile }
+	*/
+	for (entries = symbolTable.begin(); entries != symbolTable.end(); ++entries)
+		if (entries->second.getMode() == CONSTANT && entries->second.getDataType() != PROG_NAME)
+			emit(entries->second.getInternalName(), "dd", entries->second.getValue(), "; " + entries->first);
+	
+	objectFile << endl;
+	
+	emit("SECTION", ".bss");
+	/*
+	for those entries in the symbolTable that have
+	an allocation of YES and a storage mode of VARIABLE
+	{ call emit to output a line to objectFile }
+	*/
+	for (entries = symbolTable.begin(); entries != symbolTable.end(); ++entries)
+		if (entries->second.getMode() == VARIABLE)	// if it is a variable then it must allocate YES
+			emit(entries->second.getInternalName(), "resd", to_string(entries->second.getUnits()), "; " + entries->first);
+}
+
+// Lexical routines
+char Compiler::nextChar()		// returns the next character or END_OF_FILE marker
+{
+	sourceFile.get(ch); 		// ch = get a single char from sourceFile
+	static int countLine = 2;
+	bool endFile = false, skipOnce = false, skipTwice = false;
+	
+	if (token == ".")
+		endFile = true;
+	
+	if (sourceFile.eof())		// if it is the end of file function
+	{
+		ch = END_OF_FILE;
+		return ch;
+	}
+	// if ch is \n
+	else if (endFile && ch == '\n')
+	{
+		skipOnce = true;
+		sourceFile.get(ch);
+		
+		if (ch == '\n')
+			skipTwice = true;
+	}
+	else if (ch == '\n' && (!endFile || (skipOnce && skipTwice)))
+	{
+		lineNo = countLine;
+		listingFile << ch << setw(5) << countLine++ << '|';
+	}
+	else
+		listingFile << ch;
+	
+	return ch;
+}
+
+string Compiler::nextToken()	// returns the next token or END_OF_FILE marker
+{
+	token = "";
+	
+	while (token == "")
+	{
+		if (ch == '{')
+		{
+			while (nextChar() && ch != END_OF_FILE && ch != '}')
+			{}	// do nothing, just skip the words
+		
+			if (ch == END_OF_FILE)
+				processError("unexpected end of file");
+			else
+				nextChar();
+		}
+		
+		else if (ch == '}')
+			processError("'}' cannot begin token");
+		
+		else if (isspace(ch))
+			nextChar();
+		
+		else if (isSpecialSymbol(ch))
+		{
+			token = ch;
+			nextChar();
+		}
+		
+		else if (islower(ch))
+		{
+			token += ch;
+			
+			while (nextChar() && ((islower(ch) || isdigit(ch) || ch == '_')
+				&& ch != END_OF_FILE))
+					token += ch;
+			
+			if (ch == END_OF_FILE)
+				processError("unexpected end of file");
+		}
+		
+		else if (isdigit(ch))
+		{
+			token = ch;
+			
+			// build up the number or characters
+			while (isdigit(nextChar()) && ch != END_OF_FILE
+				&& !isSpecialSymbol(ch))
+					token += ch;
+			
+			if (ch == END_OF_FILE)
+				processError("unexpected end of file");
+		}
+		
+		else if (ch == END_OF_FILE)
+			token = ch;
+		
+		else
+			processError("illegal symbol");
+	}
+	
+	return token;
+}
+
+// Other routines
+string Compiler::genInternalName(storeTypes stype) const
+{
+	static int countI = 0, countB = 0, countProg = 0;
+	string name;
+	
+	if (stype == INTEGER)
+		name = 'I' + to_string(countI++);
+	else if (stype == BOOLEAN)
+		name = 'B' + to_string(countB++);
+	else
+		name = 'P' + to_string(countProg++);
+	
+	return name;
+}
+
+void Compiler::processError(string err)
+{
+	++errorCount;
+	listingFile << endl << "Error: Line " << lineNo << ": " << err;
+	createListingTrailer();
+	exit(1);	// exit with an error flag ON
+}
